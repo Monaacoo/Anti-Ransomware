@@ -1,143 +1,152 @@
-# Importa bibliotecas padrão
 import os
-import time
-import hashlib
-import psutil
-import shutil
+import tkinter as tk
+from tkinter import ttk, scrolledtext
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+import threading
+import time
+import shutil
+import hashlib
+import psutil
 from datetime import datetime
 
-# Caminho da pasta a ser monitorada (altere conforme necessário)
-FOLDER_TO_MONITOR = "C:/Users/Lucas Monaco/Documents"
-
-# Caminho da pasta de quarentena
-QUARANTINE_FOLDER = os.path.join(FOLDER_TO_MONITOR, "quarentena")
-
-# Caminho do arquivo de log
-LOG_FILE = os.path.join(FOLDER_TO_MONITOR, "log.txt")
-
-# Dicionário para armazenar os hashes dos arquivos (detecção de alterações)
+# Pasta monitorada e quarentena
+MONITOR_FOLDER = "C:/Users/SeuCaminho/Downloads"
+QUARANTINE_FOLDER = os.path.join(MONITOR_FOLDER, "quarentena")
+LOG_FILE = os.path.join(MONITOR_FOLDER, "log.txt")
+os.makedirs(QUARANTINE_FOLDER, exist_ok=True)
 file_hashes = {}
 
-# Cria a pasta de quarentena se ela não existir
-os.makedirs(QUARANTINE_FOLDER, exist_ok=True)
+# Interface
+class RansomwareGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Monitor de Ransomware")
+        self.root.geometry("800x600")
 
-# Função para registrar logs no terminal e no arquivo de log
-def log_event(message):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # Marca de tempo atual
-    full_message = f"[{timestamp}] {message}"  # Formata a mensagem
-    print(full_message)  # Exibe no terminal
-    with open(LOG_FILE, "a", encoding="utf-8") as log:  # Abre o arquivo de log no modo append
-        log.write(full_message + "\n")  # Escreve a mensagem
+        # Quarentena
+        ttk.Label(root, text="Arquivos Quarentenados:").pack()
+        self.quarantine_list = tk.Listbox(root, height=6)
+        self.quarantine_list.pack(fill=tk.X, padx=10)
 
-# Calcula o hash MD5 de um arquivo para detectar alterações
-def calculate_hash(filepath):
+        # Processos
+        ttk.Label(root, text="Processos Finalizados:").pack()
+        self.process_list = tk.Listbox(root, height=6)
+        self.process_list.pack(fill=tk.X, padx=10)
+
+        # Log ao vivo
+        ttk.Label(root, text="Log ao Vivo:").pack()
+        self.log_text = scrolledtext.ScrolledText(root, height=15)
+        self.log_text.pack(fill=tk.BOTH, expand=True, padx=10)
+
+    def add_log(self, message):
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        full_msg = f"[{timestamp}] {message}\n"
+        self.log_text.insert(tk.END, full_msg)
+        self.log_text.see(tk.END)
+        with open(LOG_FILE, "a", encoding="utf-8") as log:
+            log.write(full_msg)
+
+    def add_quarantine(self, file):
+        self.quarantine_list.insert(tk.END, file)
+
+    def add_process(self, proc):
+        self.process_list.insert(tk.END, proc)
+
+# Funções auxiliares
+def calculate_hash(path):
     try:
-        with open(filepath, "rb") as f:  # Abre o arquivo em modo binário
-            return hashlib.md5(f.read()).hexdigest()  # Retorna o hash
+        with open(path, "rb") as f:
+            return hashlib.md5(f.read()).hexdigest()
     except:
-        return None  # Retorna None caso ocorra erro ao abrir/ler
+        return None
 
-# Tira um "snapshot" inicial da pasta monitorada
-def snapshot_folder(folder):
-    for root, _, files in os.walk(folder):  # Percorre arquivos da pasta
-        for name in files:
-            path = os.path.join(root, name)
-            if not path.startswith(QUARANTINE_FOLDER):  # Ignora a pasta de quarentena
-                file_hashes[path] = calculate_hash(path)  # Salva o hash do arquivo
+def snapshot():
+    for root, _, files in os.walk(MONITOR_FOLDER):
+        for f in files:
+            path = os.path.join(root, f)
+            if not path.startswith(QUARANTINE_FOLDER):
+                file_hashes[path] = calculate_hash(path)
 
-# Move um arquivo suspeito para a pasta de quarentena com timestamp
-def move_to_quarantine(filepath):
+def move_to_quarantine(path, gui):
     try:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")  # Timestamp para nome único
-        filename = os.path.basename(filepath)  # Nome do arquivo original
-        new_name = f"{timestamp}_{filename}"  # Novo nome com timestamp
-        new_path = os.path.join(QUARANTINE_FOLDER, new_name)  # Caminho completo
-
-        shutil.move(filepath, new_path)  # Move o arquivo
-        log_event(f"🔒 Arquivo suspeito movido para quarentena: {new_path}")
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        name = os.path.basename(path)
+        new_name = f"{ts}_{name}"
+        new_path = os.path.join(QUARANTINE_FOLDER, new_name)
+        shutil.move(path, new_path)
+        gui.add_log(f"Arquivo movido para quarentena: {new_path}")
+        gui.add_quarantine(new_name)
     except Exception as e:
-        log_event(f"ERRO ao mover para quarentena: {e}")  # Loga erro se falhar
+        gui.add_log(f"Erro ao mover para quarentena: {e}")
 
-# Classe que lida com eventos do sistema de arquivos
-class RansomwareDetector(FileSystemEventHandler):
+def kill_process_using(path, gui):
+    for proc in psutil.process_iter(['pid', 'name', 'open_files']):
+        try:
+            if proc.info['open_files']:
+                for f in proc.info['open_files']:
+                    if path == f.path:
+                        proc.kill()
+                        gui.add_log(f"Processo finalizado: {proc.info['name']} (PID: {proc.info['pid']})")
+                        gui.add_process(f"{proc.info['name']} (PID: {proc.info['pid']})")
+                        return
+        except:
+            continue
 
-    # Quando um arquivo for modificado
+def looks_like_ransom(path):
+    ext = os.path.splitext(path)[1].lower()
+    name = os.path.basename(path).upper()
+    suspicious_exts = ['.locked', '.enc', '.crypt', '.encrypted']
+    ransom_names = ['README', 'DECRYPT', 'RECOVER']
+    return ext in suspicious_exts or any(x in name for x in ransom_names)
+
+# Watchdog handler
+class Handler(FileSystemEventHandler):
+    def __init__(self, gui):
+        self.gui = gui
+
     def on_modified(self, event):
-        if not event.is_directory:  # Ignora diretórios
+        if not event.is_directory:
             path = event.src_path
-            if path.startswith(QUARANTINE_FOLDER):  # Ignora a pasta de quarentena
+            if path.startswith(QUARANTINE_FOLDER):
                 return
+            new = calculate_hash(path)
+            old = file_hashes.get(path)
+            if old and new != old:
+                self.gui.add_log(f"Arquivo modificado: {path}")
+                if looks_like_ransom(path):
+                    move_to_quarantine(path, self.gui)
+                    kill_process_using(path, self.gui)
+            file_hashes[path] = new
 
-            new_hash = calculate_hash(path)  # Calcula novo hash
-            old_hash = file_hashes.get(path)  # Pega hash antigo salvo
-
-            if old_hash and new_hash != old_hash:  # Se mudou...
-                log_event(f"⚠️ Arquivo modificado: {path}")
-
-                # Se for suspeito, toma ação
-                if self.looks_like_ransom(path):
-                    log_event("🚨 Possível ransomware detectado!")
-                    move_to_quarantine(path)
-                    self.kill_suspect_process(path)
-
-            file_hashes[path] = new_hash  # Atualiza o hash
-
-    # Quando um novo arquivo for criado
     def on_created(self, event):
         if not event.is_directory:
             path = event.src_path
             if path.startswith(QUARANTINE_FOLDER):
                 return
+            self.gui.add_log(f"Arquivo criado: {path}")
+            if looks_like_ransom(path):
+                move_to_quarantine(path, self.gui)
+                kill_process_using(path, self.gui)
+            file_hashes[path] = calculate_hash(path)
 
-            log_event(f"📄 Novo arquivo criado: {path}")
+# Iniciar GUI + Observer
 
-            if self.looks_like_ransom(path):  # Se parecer com ransomware...
-                log_event("🚨 Arquivo suspeito criado!")
-                move_to_quarantine(path)
-                self.kill_suspect_process(path)
-
-    # Função que verifica se um arquivo tem características de ransomware
-    def looks_like_ransom(self, path):
-        suspicious_exts = ['.locked', '.crypt', '.enc', '.encrypted']  # Extensões comuns
-        ransom_note_names = ['README', 'DECRYPT', 'RECOVER']  # Palavras-chave
-
-        ext = os.path.splitext(path)[1].lower()  # Pega a extensão
-        name = os.path.basename(path).upper()  # Nome do arquivo em caixa alta
-
-        # Se tiver extensão suspeita ou nome típico de ransom note
-        return ext in suspicious_exts or any(note in name for note in ransom_note_names)
-
-    # Função para encerrar processo que estiver manipulando o arquivo
-    def kill_suspect_process(self, filepath):
-        for proc in psutil.process_iter(['pid', 'name', 'open_files']):  # Itera por processos
-            try:
-                if proc.info['open_files']:  # Verifica arquivos abertos
-                    for f in proc.info['open_files']:
-                        if filepath in f.path:  # Se o arquivo estiver aberto pelo processo
-                            log_event(f"🔪 Matando processo suspeito: {proc.info['name']} (PID: {proc.info['pid']})")
-                            proc.kill()  # Encerra o processo
-                            return
-            except Exception as e:
-                log_event(f"ERRO ao tentar encerrar processo: {e}")  # Loga erro
-                continue
-
-# Função principal
-if __name__ == "__main__":
-    log_event("🛡️ Monitoramento de ransomware iniciado.")
-    snapshot_folder(FOLDER_TO_MONITOR)  # Inicializa os hashes
-
-    # Configura observador
-    event_handler = RansomwareDetector()
+def start_monitor(gui):
+    snapshot()
     observer = Observer()
-    observer.schedule(event_handler, FOLDER_TO_MONITOR, recursive=True)
+    observer.schedule(Handler(gui), MONITOR_FOLDER, recursive=True)
     observer.start()
-
     try:
         while True:
-            time.sleep(10)  # Loop principal: dorme e espera eventos
-    except KeyboardInterrupt:  # Se o usuário parar com Ctrl+C
+            time.sleep(1)
+    except KeyboardInterrupt:
         observer.stop()
     observer.join()
-    log_event("⛔ Monitoramento encerrado pelo usuário.")
+
+if __name__ == '__main__':
+    root = tk.Tk()
+    gui = RansomwareGUI(root)
+    thread = threading.Thread(target=start_monitor, args=(gui,), daemon=True)
+    thread.start()
+    root.mainloop()
